@@ -2,37 +2,13 @@ using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
 
-/// <summary>
-/// Affiche toute l'UI du jeu sur un Canvas Screen Space Overlay.
-///
-/// Setup :
-///   1. Créer un Canvas (Screen Space - Overlay).
-///   2. Créer la hiérarchie suivante et assigner dans l'Inspector :
-///
-///   Canvas
-///   ├── PanelStats          (haut de l'écran)
-///   │   ├── TxtScore        TextMeshProUGUI  "Score : 0"
-///   │   ├── TxtRound        TextMeshProUGUI  "Manche : 1"
-///   │   └── TxtLives        TextMeshProUGUI  "❤️❤️❤️"
-///   ├── PanelCountdown      (centre)
-///   │   └── TxtCountdown    TextMeshProUGUI  "3"
-///   ├── PanelResult         (centre, sous countdown)
-///   │   ├── TxtPlayer       TextMeshProUGUI  "Vous : ✊"
-///   │   ├── TxtVS           TextMeshProUGUI  "VS"
-///   │   ├── TxtCPU          TextMeshProUGUI  "CPU : ✋"
-///   │   └── TxtResultLabel  TextMeshProUGUI  "GAGNÉ !"
-///   ├── PanelWaiting        (centre)
-///   │   └── TxtWaiting      TextMeshProUGUI  "Faites votre geste !"
-///   └── PanelGameOver       (plein écran)
-///       ├── TxtGameOver     TextMeshProUGUI  "GAME OVER"
-///       ├── TxtFinalScore   TextMeshProUGUI  "Score final : 0"
-///       └── BtnRestart      Button           "Rejouer"
-/// </summary>
 public class GameUI : MonoBehaviour
 {
-    // ── Inspector ────────────────────────────────────────────────────────────
+    [Header("Caméra")]
+    [SerializeField] private Camera  xrCamera;
+    [SerializeField] private Vector3 offsetFromCamera = new Vector3(0f, 0f, 1.2f);
 
-    [Header("Stats (haut)")]
+    [Header("Stats")]
     [SerializeField] private TextMeshProUGUI txtScore;
     [SerializeField] private TextMeshProUGUI txtRound;
     [SerializeField] private TextMeshProUGUI txtLives;
@@ -57,53 +33,58 @@ public class GameUI : MonoBehaviour
     [SerializeField] private TextMeshProUGUI txtFinalScore;
     [SerializeField] private Button          btnRestart;
 
-    // ── Référence ─────────────────────────────────────────────────────────────
-
     private GameManager _gm;
 
-    // ── Emojis ───────────────────────────────────────────────────────────────
-
-    private static string GestureEmoji(GestureDetector.Gesture g) => g switch
+    private static string GestureLabel(GestureDetector.Gesture g) => g switch
     {
         GestureDetector.Gesture.Rock     => "Pierre",
         GestureDetector.Gesture.Paper    => "Feuille",
         GestureDetector.Gesture.Scissors => "Ciseaux",
-        _                                => "Non-Détecté",
+        _                                => "Inconnu",
     };
 
     private static string LivesString(int lives)
     {
-        return lives.ToString();
+        string s = "";
+        for (int i = 0; i < GameManager.MaxLives; i++)
+            s += i < lives ? "♥ " : "♡ ";
+        return s.TrimEnd();
     }
-
-    // ── Unity ────────────────────────────────────────────────────────────────
 
     private void Awake()
     {
         _gm = FindAnyObjectByType<GameManager>();
         btnRestart?.onClick.AddListener(() => _gm?.RestartGame());
+        if (xrCamera == null) xrCamera = Camera.main;
         HideAll();
     }
 
     private void OnEnable()
     {
-        GameManager.OnStateChanged   += HandleState;
-        GameManager.OnCountdownTick  += HandleCountdown;
-        GameManager.OnRoundResolved  += HandleRoundResolved;
-        GameManager.OnStatsUpdated   += HandleStats;
-        GameManager.OnGameOver       += HandleGameOver;
+        GameManager.OnStateChanged  += HandleState;
+        GameManager.OnCountdownTick += HandleCountdown;
+        GameManager.OnRoundResolved += HandleRoundResolved;
+        GameManager.OnStatsUpdated  += HandleStats;
+        GameManager.OnGameOver      += HandleGameOver;
     }
 
     private void OnDisable()
     {
-        GameManager.OnStateChanged   -= HandleState;
-        GameManager.OnCountdownTick  -= HandleCountdown;
-        GameManager.OnRoundResolved  -= HandleRoundResolved;
-        GameManager.OnStatsUpdated   -= HandleStats;
-        GameManager.OnGameOver       -= HandleGameOver;
+        GameManager.OnStateChanged  -= HandleState;
+        GameManager.OnCountdownTick -= HandleCountdown;
+        GameManager.OnRoundResolved -= HandleRoundResolved;
+        GameManager.OnStatsUpdated  -= HandleStats;
+        GameManager.OnGameOver      -= HandleGameOver;
     }
 
-    // ── Handlers ─────────────────────────────────────────────────────────────
+    private void LateUpdate()
+    {
+        if (xrCamera == null) return;
+        transform.position = xrCamera.transform.TransformPoint(offsetFromCamera);
+        transform.rotation = Quaternion.LookRotation(
+            transform.position - xrCamera.transform.position,
+            xrCamera.transform.up);
+    }
 
     private void HandleState(GameManager.GameState state)
     {
@@ -113,16 +94,13 @@ public class GameUI : MonoBehaviour
             case GameManager.GameState.Countdown:
                 panelCountdown?.SetActive(true);
                 break;
-
             case GameManager.GameState.WaitingGesture:
                 panelWaiting?.SetActive(true);
                 if (txtWaiting) txtWaiting.text = "Faites votre geste !";
                 break;
-
             case GameManager.GameState.Resolving:
                 panelResult?.SetActive(true);
                 break;
-
             case GameManager.GameState.GameOver:
                 panelGameOver?.SetActive(true);
                 break;
@@ -139,17 +117,17 @@ public class GameUI : MonoBehaviour
         GestureDetector.Gesture cpu,
         GameManager.RoundResult result)
     {
-        if (txtPlayer) txtPlayer.text = $"Vous\n{GestureEmoji(player)}";
-        if (txtCPU   ) txtCPU.text    = $"CPU\n{GestureEmoji(cpu)}";
+        if (txtPlayer) txtPlayer.text = $"Vous\n{GestureLabel(player)}";
+        if (txtCPU)    txtCPU.text    = $"CPU\n{GestureLabel(cpu)}";
 
         if (txtResultLabel)
         {
             (txtResultLabel.text, txtResultLabel.color) = result switch
             {
-                GameManager.RoundResult.Win  => ("Victoire",  Color.green),
-                GameManager.RoundResult.Lose => ("Défaite",  Color.red  ),
-                GameManager.RoundResult.Draw => ("Égalité", Color.white ),
-                _                            => ("",            Color.white ),
+                GameManager.RoundResult.Win  => ("GAGNE !",  Color.green),
+                GameManager.RoundResult.Lose => ("PERDU !",  Color.red  ),
+                GameManager.RoundResult.Draw => ("EGALITE",  Color.white),
+                _                            => ("",          Color.white),
             };
         }
     }
@@ -163,11 +141,9 @@ public class GameUI : MonoBehaviour
 
     private void HandleGameOver(bool victory)
     {
-        if (txtGameOver   ) txtGameOver.text    = victory ? "VICTOIRE !" : "GAME OVER";
-        if (txtFinalScore ) txtFinalScore.text  = $"Score final : {_gm?.Score ?? 0}";
+        if (txtGameOver)   txtGameOver.text   = victory ? "VICTOIRE !" : "GAME OVER";
+        if (txtFinalScore) txtFinalScore.text = $"Score final : {_gm?.Score ?? 0}";
     }
-
-    // ── Helpers ──────────────────────────────────────────────────────────────
 
     private void HideAll()
     {

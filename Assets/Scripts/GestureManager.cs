@@ -4,19 +4,16 @@ using UnityEngine.XR.Hands;
 
 public class GestureDetector : MonoBehaviour
 {
-    public enum Gesture { Unknown, Rock, Paper, Scissors }
+    public enum Gesture { Unknown, Rock, Paper, Scissors, MiddleFinger }
 
     public static event Action<Gesture, Handedness> OnGestureChanged;
 
     [Header("Main surveillée")]
-    [SerializeField] private Handedness watchedHand = Handedness.Right;
+    [SerializeField] private Handedness watchedHand = Handedness.Invalid; // Invalid = les deux
 
-    [Header("Seuils (distance tip→paume, en mètres)")]
-    [Tooltip("En dessous : doigt replié")]
+    [Header("Seuils (distance tip->paume, metres)")]
     [SerializeField] private float curledDistance   = 0.06f;
-    [Tooltip("Au dessus : doigt étendu (Ciseaux/Pierre)")]
     [SerializeField] private float extendedDistance = 0.10f;
-    [Tooltip("Seuil plus bas pour la Feuille — compense le tracking imprécis des doigts tendus")]
     [SerializeField] private float paperDistance    = 0.08f;
 
     [Header("Stabilisation")]
@@ -27,11 +24,13 @@ public class GestureDetector : MonoBehaviour
     [HideInInspector] public float dbgIndex, dbgMiddle, dbgRing, dbgPinky;
 
     private XRHandSubsystem _subsystem;
-    private Gesture         _lastConfirmedGesture = Gesture.Unknown;
-    private Gesture         _candidateGesture     = Gesture.Unknown;
-    private float           _candidateTimer       = 0f;
 
-    private static readonly (XRHandJointID mcp, XRHandJointID tip)[] Fingers =
+    // État par main
+    private Gesture _lastRight = Gesture.Unknown, _candidateRight = Gesture.Unknown;
+    private Gesture _lastLeft  = Gesture.Unknown, _candidateLeft  = Gesture.Unknown;
+    private float   _timerRight, _timerLeft;
+
+    private static readonly (XRHandJointID proximal, XRHandJointID tip)[] Fingers =
     {
         (XRHandJointID.IndexProximal,  XRHandJointID.IndexTip ),
         (XRHandJointID.MiddleProximal, XRHandJointID.MiddleTip),
@@ -51,14 +50,32 @@ public class GestureDetector : MonoBehaviour
     {
         if (_subsystem == null) return;
 
-        XRHand hand = watchedHand == Handedness.Right
-            ? _subsystem.rightHand : _subsystem.leftHand;
+        // Surveille la main droite si pas de filtre ou filtre = Right
+        if (watchedHand == Handedness.Invalid || watchedHand == Handedness.Right)
+            ProcessHand(_subsystem.rightHand, Handedness.Right);
 
-        if (!hand.isTracked) { ResetCandidate(); return; }
+        // Surveille la main gauche si pas de filtre ou filtre = Left
+        if (watchedHand == Handedness.Invalid || watchedHand == Handedness.Left)
+            ProcessHand(_subsystem.leftHand, Handedness.Left);
+    }
 
+    private void ProcessHand(XRHand hand, Handedness side)
+    {
+        if (!hand.isTracked)
+        {
+            ResetCandidate(side);
+            return;
+        }
+
+        Gesture detected = DetectGesture(hand, side);
+        Stabilize(detected, side);
+    }
+
+    private Gesture DetectGesture(XRHand hand, Handedness side)
+    {
         if (!hand.GetJoint(XRHandJointID.Wrist        ).TryGetPose(out Pose wrist ) ||
             !hand.GetJoint(XRHandJointID.MiddleProximal).TryGetPose(out Pose midMcp))
-        { ResetCandidate(); return; }
+            return Gesture.Unknown;
 
         Vector3 palmCenter = (wrist.position + midMcp.position) * 0.5f;
 
@@ -68,63 +85,74 @@ public class GestureDetector : MonoBehaviour
                 ? Vector3.Distance(tip.position, palmCenter)
                 : extendedDistance;
 
-        dbgIndex = dist[0]; dbgMiddle = dist[1];
-        dbgRing  = dist[2]; dbgPinky  = dist[3];
+        // Debug uniquement sur la main droite pour éviter le spam
+        if (side == Handedness.Right)
+        {
+            dbgIndex = dist[0]; dbgMiddle = dist[1];
+            dbgRing  = dist[2]; dbgPinky  = dist[3];
+        }
 
-        // Règles strictes (seuils normaux)
-        bool indexExt  = dist[0] >= extendedDistance;
-        bool middleExt = dist[1] >= extendedDistance;
-        bool ringCurl  = dist[2] <= curledDistance;
-        bool pinkyCurl = dist[3] <= curledDistance;
-        bool indexCurl = dist[0] <= curledDistance;
-        bool middleCurl= dist[1] <= curledDistance;
+        bool indexExt   = dist[0] >= extendedDistance;
+        bool middleExt  = dist[1] >= extendedDistance;
+        bool ringCurl   = dist[2] <= curledDistance;
+        bool pinkyCurl  = dist[3] <= curledDistance;
+        bool indexCurl  = dist[0] <= curledDistance;
+        bool middleCurl = dist[1] <= curledDistance;
 
-        // Règles souples pour la feuille (seuil abaissé)
-        bool indexPaper  = dist[0] >= paperDistance;
-        bool middlePaper = dist[1] >= paperDistance;
-        bool ringPaper   = dist[2] >= paperDistance;
-        bool pinkyPaper  = dist[3] >= paperDistance;
+        // Pouce étendu pour le majeur
+        bool thumbExt = false;
+        if (hand.GetJoint(XRHandJointID.ThumbTip     ).TryGetPose(out Pose thumbTip) &&
+            hand.GetJoint(XRHandJointID.ThumbProximal ).TryGetPose(out Pose thumbBase))
+            thumbExt = Vector3.Distance(thumbTip.position, palmCenter) >= extendedDistance;
 
-        Gesture detected;
+        // ── Majeur (quitter) : majeur + pouce étendus, index/annulaire/auriculaire repliés ──
+        if (middleExt && thumbExt && indexCurl && ringCurl && pinkyCurl)
+            return Gesture.MiddleFinger;
 
-        // Ciseaux en premier (le plus spécifique)
+        // ── Ciseaux ──
         if (indexExt && middleExt && ringCurl && pinkyCurl)
-            detected = Gesture.Scissors;
-        // Pierre : tous repliés
-        else if (indexCurl && middleCurl && ringCurl && pinkyCurl)
-            detected = Gesture.Rock;
-        // Feuille : tous "assez" étendus avec le seuil souple
-        else if (indexPaper && middlePaper && ringPaper && pinkyPaper)
-            detected = Gesture.Paper;
-        else
-            detected = Gesture.Unknown;
+            return Gesture.Scissors;
 
-        Stabilize(detected);
+        // ── Pierre ──
+        if (indexCurl && middleCurl && ringCurl && pinkyCurl)
+            return Gesture.Rock;
+
+        // ── Feuille (seuil souple) ──
+        bool paperAll = dist[0] >= paperDistance && dist[1] >= paperDistance &&
+                        dist[2] >= paperDistance && dist[3] >= paperDistance;
+        if (paperAll)
+            return Gesture.Paper;
+
+        return Gesture.Unknown;
     }
 
-    private void Stabilize(Gesture detected)
+    private void Stabilize(Gesture detected, Handedness side)
     {
-        if (detected == _candidateGesture)
+        ref Gesture last      = ref (side == Handedness.Right ? ref _lastRight      : ref _lastLeft);
+        ref Gesture candidate = ref (side == Handedness.Right ? ref _candidateRight : ref _candidateLeft);
+        ref float   timer     = ref (side == Handedness.Right ? ref _timerRight     : ref _timerLeft);
+
+        if (detected == candidate)
         {
-            _candidateTimer += Time.deltaTime;
-            if (_candidateTimer >= holdDuration && detected != _lastConfirmedGesture)
+            timer += Time.deltaTime;
+            if (timer >= holdDuration && detected != last)
             {
-                _lastConfirmedGesture = detected;
+                last = detected;
                 if (logToConsole)
-                    Debug.Log($"[GestureDetector] {watchedHand} → {detected}");
-                OnGestureChanged?.Invoke(detected, watchedHand);
+                    Debug.Log($"[GestureDetector] {side} -> {detected}");
+                OnGestureChanged?.Invoke(detected, side);
             }
         }
         else
         {
-            _candidateGesture = detected;
-            _candidateTimer   = 0f;
+            candidate = detected;
+            timer     = 0f;
         }
     }
 
-    private void ResetCandidate()
+    private void ResetCandidate(Handedness side)
     {
-        _candidateGesture = Gesture.Unknown;
-        _candidateTimer   = 0f;
+        if (side == Handedness.Right) { _candidateRight = Gesture.Unknown; _timerRight = 0f; }
+        else                          { _candidateLeft  = Gesture.Unknown; _timerLeft  = 0f; }
     }
 }
